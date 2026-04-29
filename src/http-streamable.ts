@@ -680,7 +680,8 @@ function sendMcpResponse(res: express.Response, payload: object, req: express.Re
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    res.setHeader('Content-Type', 'application/json');
+      res.status(200).json(initResponse);
     res.end();
   }
 }
