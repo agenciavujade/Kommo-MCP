@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosError } from 'axios';
 
 export interface KommoConfig {
   baseUrl: string;
@@ -21,6 +21,7 @@ export interface KommoLead {
   tags?: string[];
   contacts?: KommoContact[];
   companies?: KommoCompany[];
+  custom_fields_values?: any[];
 }
 
 export interface KommoContact {
@@ -59,11 +60,10 @@ export interface KommoPipeline {
   is_unsorted_on: boolean;
   is_archive: boolean;
   account_id: number;
-  _links: {
-    self: {
-      href: string;
-    };
+  _embedded?: {
+    statuses?: KommoStatus[];
   };
+  _links?: any;
 }
 
 export interface KommoTask {
@@ -76,50 +76,45 @@ export interface KommoTask {
   created_at: number;
   updated_at: number;
   complete_till: number;
-  result?: {
-    text: string;
-  };
+  is_completed?: boolean;
+  task_type_id?: number;
+  result?: { text: string };
 }
 
-// Novas interfaces para Eventos e Atividades
+export interface KommoNote {
+  id: number;
+  entity_id: number;
+  created_by: number;
+  created_at: number;
+  updated_at: number;
+  responsible_user_id: number;
+  group_id?: number;
+  note_type: string;
+  params?: any;
+}
+
 export interface KommoEvent {
-  id: number;
+  id: string;
+  type: string;
   entity_id: number;
   entity_type: string;
-  type: string;
-  created_at: number;
-  updated_at: number;
   created_by: number;
-  responsible_user_id: number;
-  text?: string;
-  data?: any;
+  created_at: number;
+  value_after?: any;
+  value_before?: any;
 }
 
-export interface KommoActivity {
-  id: number;
-  entity_id: number;
-  entity_type: string;
-  type: string;
-  created_at: number;
-  updated_at: number;
-  created_by: number;
-  responsible_user_id: number;
-  text?: string;
-  data?: any;
-}
-
-// Novas interfaces para Status
 export interface KommoStatus {
   id: number;
   name: string;
   sort: number;
-  color: string;
+  is_editable?: boolean;
   pipeline_id: number;
-  type: number;
+  color: string;
+  type: number; // 0 = normal, 1 = won, 2 = lost
   account_id: number;
 }
 
-// Motivos da perda de leads (API 2026)
 export interface KommoLossReason {
   id: number;
   name: string;
@@ -127,62 +122,12 @@ export interface KommoLossReason {
   is_editable?: boolean;
 }
 
-// Novas interfaces para Relatórios
-export interface KommoSalesReport {
-  period: {
-    from: string;
-    to: string;
-  };
-  leads: {
-    total: number;
-    new: number;
-    won: number;
-    lost: number;
-  };
-  revenue: {
-    total: number;
-    average: number;
-    conversion_rate: number;
-  };
-  performance: {
-    by_user: Array<{
-      user_id: number;
-      user_name: string;
-      leads_count: number;
-      revenue: number;
-    }>;
-    by_pipeline: Array<{
-      pipeline_id: number;
-      pipeline_name: string;
-      leads_count: number;
-      revenue: number;
-    }>;
-  };
-}
-
-export interface KommoDashboardData {
-  leads: {
-    total: number;
-    new_today: number;
-    won_today: number;
-    lost_today: number;
-  };
-  tasks: {
-    total: number;
-    completed_today: number;
-    overdue: number;
-  };
-  revenue: {
-    this_month: number;
-    last_month: number;
-    growth_percentage: number;
-  };
-  top_pipelines: Array<{
-    id: number;
-    name: string;
-    leads_count: number;
-    revenue: number;
-  }>;
+export interface KommoUser {
+  id: number;
+  name: string;
+  email: string;
+  lang: string;
+  rights: any;
 }
 
 export class KommoAPI {
@@ -195,329 +140,243 @@ export class KommoAPI {
         'Authorization': `Bearer ${config.accessToken}`,
         'Content-Type': 'application/json',
       },
+      timeout: 30000,
     });
   }
 
-  // Account methods
+  // ===== Account =====
   async getAccount(): Promise<any> {
-    const response = await this.client.get('/api/v4/account');
-    return response.data;
+    const r = await this.client.get('/api/v4/account');
+    return r.data;
   }
 
-  // Leads methods
-  async getLeads(params?: any): Promise<{ _embedded: { leads: KommoLead[] } }> {
-    const response = await this.client.get('/api/v4/leads', { params });
-    return response.data;
+  // ===== Leads =====
+  async getLeads(params?: any): Promise<any> {
+    const r = await this.client.get('/api/v4/leads', { params });
+    return r.data;
+  }
+
+  async getLead(id: number, withParam?: string): Promise<KommoLead> {
+    const params: any = {};
+    if (withParam) params.with = withParam;
+    const r = await this.client.get(`/api/v4/leads/${id}`, { params });
+    return r.data;
   }
 
   async getAllLeads(params?: any): Promise<KommoLead[]> {
     const allLeads: KommoLead[] = [];
     let page = 1;
     let hasMore = true;
-    const limit = 250; // API limit per page
+    const limit = 250;
     let consecutiveEmptyPages = 0;
-    const maxEmptyPages = 2; // Stop after 2 consecutive empty pages
+    const maxEmptyPages = 2;
+    const maxPages = 50; // safety cap (12.5k leads max)
 
-    while (hasMore && consecutiveEmptyPages < maxEmptyPages) {
+    while (hasMore && consecutiveEmptyPages < maxEmptyPages && page <= maxPages) {
       try {
-        const response = await this.client.get('/api/v4/leads', { 
-          params: { 
-            ...params, 
-            limit, 
-            page 
-          } 
+        const r = await this.client.get('/api/v4/leads', {
+          params: { ...params, limit, page }
         });
-        
-        const data = response.data;
-        const leads = data._embedded?.leads || [];
-        
+        const leads = r.data._embedded?.leads || [];
         if (leads.length === 0) {
           consecutiveEmptyPages++;
         } else {
           consecutiveEmptyPages = 0;
           allLeads.push(...leads);
         }
-        
         page++;
-        
-        // Check if there's a next page
-        hasMore = !!data._links?.next;
-        
-        // Add small delay to avoid rate limiting
-        if (hasMore) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      } catch (error) {
-        console.error(`Error fetching page ${page}:`, error);
+        hasMore = !!r.data._links?.next;
+        if (hasMore) await new Promise(res => setTimeout(res, 150)); // rate-limit safety
+      } catch (err) {
+        console.error(`Erro paginação leads página ${page}:`, err);
         break;
       }
     }
-
     return allLeads;
   }
 
-  async getLead(id: number): Promise<KommoLead> {
-    const response = await this.client.get(`/api/v4/leads/${id}`);
-    return response.data;
-  }
-
   async createLead(lead: Partial<KommoLead>): Promise<KommoLead> {
-    const response = await this.client.post('/api/v4/leads', [lead]);
-    return response.data._embedded.leads[0];
+    const r = await this.client.post('/api/v4/leads', [lead]);
+    return r.data._embedded.leads[0];
   }
 
   async updateLead(id: number, lead: Partial<KommoLead>): Promise<KommoLead> {
-    const response = await this.client.patch(`/api/v4/leads/${id}`, lead);
-    return response.data;
+    const r = await this.client.patch(`/api/v4/leads/${id}`, lead);
+    return r.data;
   }
 
-  // Motivos da perda de leads (API 2026)
-  async getLossReasons(): Promise<{ _embedded: { loss_reasons: KommoLossReason[] } }> {
-    const response = await this.client.get('/api/v4/leads/loss_reasons');
-    return response.data;
-  }
-
-  async getLossReason(id: number): Promise<KommoLossReason> {
-    const response = await this.client.get(`/api/v4/leads/loss_reasons/${id}`);
-    return response.data;
-  }
-
-  // Contacts methods
-  async getContacts(params?: any): Promise<{ _embedded: { contacts: KommoContact[] } }> {
-    const response = await this.client.get('/api/v4/contacts', { params });
-    return response.data;
+  // ===== Contacts =====
+  async getContacts(params?: any): Promise<any> {
+    const r = await this.client.get('/api/v4/contacts', { params });
+    return r.data;
   }
 
   async getContact(id: number): Promise<KommoContact> {
-    const response = await this.client.get(`/api/v4/contacts/${id}`);
-    return response.data;
+    const r = await this.client.get(`/api/v4/contacts/${id}`);
+    return r.data;
   }
 
   async createContact(contact: Partial<KommoContact>): Promise<KommoContact> {
-    const response = await this.client.post('/api/v4/contacts', [contact]);
-    return response.data._embedded.contacts[0];
+    const r = await this.client.post('/api/v4/contacts', [contact]);
+    return r.data._embedded.contacts[0];
   }
 
   async updateContact(id: number, contact: Partial<KommoContact>): Promise<KommoContact> {
-    const response = await this.client.patch(`/api/v4/contacts/${id}`, contact);
-    return response.data;
+    const r = await this.client.patch(`/api/v4/contacts/${id}`, contact);
+    return r.data;
   }
 
-  // Companies methods
-  async getCompanies(params?: any): Promise<{ _embedded: { companies: KommoCompany[] } }> {
-    const response = await this.client.get('/api/v4/companies', { params });
-    return response.data;
+  // ===== Companies =====
+  async getCompanies(params?: any): Promise<any> {
+    const r = await this.client.get('/api/v4/companies', { params });
+    return r.data;
   }
 
   async getCompany(id: number): Promise<KommoCompany> {
-    const response = await this.client.get(`/api/v4/companies/${id}`);
-    return response.data;
+    const r = await this.client.get(`/api/v4/companies/${id}`);
+    return r.data;
   }
 
   async createCompany(company: Partial<KommoCompany>): Promise<KommoCompany> {
-    const response = await this.client.post('/api/v4/companies', [company]);
-    return response.data._embedded.companies[0];
+    const r = await this.client.post('/api/v4/companies', [company]);
+    return r.data._embedded.companies[0];
   }
 
   async updateCompany(id: number, company: Partial<KommoCompany>): Promise<KommoCompany> {
-    const response = await this.client.patch(`/api/v4/companies/${id}`, company);
-    return response.data;
+    const r = await this.client.patch(`/api/v4/companies/${id}`, company);
+    return r.data;
   }
 
-  // Pipelines methods
-  async getPipelines(): Promise<{ _embedded: { pipelines: KommoPipeline[] } }> {
-    const response = await this.client.get('/api/v4/leads/pipelines');
-    return response.data;
+  // ===== Pipelines + Statuses =====
+  async getPipelines(): Promise<any> {
+    const r = await this.client.get('/api/v4/leads/pipelines');
+    return r.data;
   }
 
   async getPipeline(id: number): Promise<KommoPipeline> {
-    const response = await this.client.get(`/api/v4/leads/pipelines/${id}`);
-    return response.data;
+    const r = await this.client.get(`/api/v4/leads/pipelines/${id}`);
+    return r.data;
   }
 
-  // Tasks methods
-  async getTasks(params?: any): Promise<{ _embedded: { tasks: KommoTask[] } }> {
-    const response = await this.client.get('/api/v4/tasks', { params });
-    return response.data;
+  async getPipelineStatuses(pipelineId: number): Promise<any> {
+    const r = await this.client.get(`/api/v4/leads/pipelines/${pipelineId}/statuses`);
+    return r.data;
+  }
+
+  // ===== Tasks =====
+  async getTasks(params?: any): Promise<any> {
+    const r = await this.client.get('/api/v4/tasks', { params });
+    return r.data;
   }
 
   async getTask(id: number): Promise<KommoTask> {
-    const response = await this.client.get(`/api/v4/tasks/${id}`);
-    return response.data;
+    const r = await this.client.get(`/api/v4/tasks/${id}`);
+    return r.data;
   }
 
   async createTask(task: Partial<KommoTask>): Promise<KommoTask> {
-    const response = await this.client.post('/api/v4/tasks', [task]);
-    return response.data._embedded.tasks[0];
+    const r = await this.client.post('/api/v4/tasks', [task]);
+    return r.data._embedded.tasks[0];
   }
 
   async updateTask(id: number, task: Partial<KommoTask>): Promise<KommoTask> {
-    const response = await this.client.patch(`/api/v4/tasks/${id}`, task);
-    return response.data;
+    const r = await this.client.patch(`/api/v4/tasks/${id}`, task);
+    return r.data;
   }
 
-  // Users methods
-  async getUsers(): Promise<{ _embedded: { users: any[] } }> {
-    const response = await this.client.get('/api/v4/users');
-    return response.data;
+  async completeTask(id: number, resultText?: string): Promise<KommoTask> {
+    const payload: any = { is_completed: true };
+    if (resultText) payload.result = { text: resultText };
+    const r = await this.client.patch(`/api/v4/tasks/${id}`, payload);
+    return r.data;
   }
 
-  async getUser(id: number): Promise<any> {
-    const response = await this.client.get(`/api/v4/users/${id}`);
-    return response.data;
+  // ===== Users =====
+  async getUsers(): Promise<any> {
+    const r = await this.client.get('/api/v4/users');
+    return r.data;
   }
 
-  // ===== NOVOS MÉTODOS: GESTÃO DE EVENTOS E ATIVIDADES =====
-
-  // Eventos de leads
-  async getLeadEvents(leadId: number, params?: any): Promise<{ _embedded: { events: KommoEvent[] } }> {
-    const response = await this.client.get(`/api/v4/leads/${leadId}/events`, { params });
-    return response.data;
+  async getUser(id: number): Promise<KommoUser> {
+    const r = await this.client.get(`/api/v4/users/${id}`);
+    return r.data;
   }
 
-  async createLeadEvent(leadId: number, eventData: Partial<KommoEvent>): Promise<KommoEvent> {
-    const response = await this.client.post(`/api/v4/leads/${leadId}/events`, [eventData]);
-    return response.data._embedded.events[0];
+  // ===== Events =====
+  async getEvents(params?: any): Promise<any> {
+    const r = await this.client.get('/api/v4/events', { params });
+    return r.data;
   }
 
-  async updateLeadEvent(leadId: number, eventId: number, eventData: Partial<KommoEvent>): Promise<KommoEvent> {
-    const response = await this.client.patch(`/api/v4/leads/${leadId}/events/${eventId}`, eventData);
-    return response.data;
+  async getLeadEvents(leadId: number, params?: any): Promise<any> {
+    const r = await this.client.get(`/api/v4/leads/${leadId}/events`, { params });
+    return r.data;
   }
 
-  // Atividades de contatos
-  async getContactActivities(contactId: number, params?: any): Promise<{ _embedded: { activities: KommoActivity[] } }> {
-    const response = await this.client.get(`/api/v4/contacts/${contactId}/activities`, { params });
-    return response.data;
+  // ===== Notes =====
+  async getLeadNotes(leadId: number, params?: any): Promise<any> {
+    const r = await this.client.get(`/api/v4/leads/${leadId}/notes`, { params });
+    return r.data;
   }
 
-  async createContactActivity(contactId: number, activityData: Partial<KommoActivity>): Promise<KommoActivity> {
-    const response = await this.client.post(`/api/v4/contacts/${contactId}/activities`, [activityData]);
-    return response.data._embedded.activities[0];
+  async addNoteToLead(leadId: number, text: string, noteType: string = 'common'): Promise<KommoNote> {
+    const payload = [{ note_type: noteType, params: { text } }];
+    const r = await this.client.post(`/api/v4/leads/${leadId}/notes`, payload);
+    return r.data._embedded.notes[0];
   }
 
-  async updateContactActivity(contactId: number, activityId: number, activityData: Partial<KommoActivity>): Promise<KommoActivity> {
-    const response = await this.client.patch(`/api/v4/contacts/${contactId}/activities/${activityId}`, activityData);
-    return response.data;
-  }
-
-  // ===== NOVOS MÉTODOS: GESTÃO DE STATUS E PIPELINES =====
-
-  // Status de leads
-  async getLeadStatuses(pipelineId: number): Promise<{ _embedded: { statuses: KommoStatus[] } }> {
-    const response = await this.client.get(`/api/v4/leads/pipelines/${pipelineId}/statuses`);
-    return response.data;
-  }
-
-  async createLeadStatus(pipelineId: number, statusData: Partial<KommoStatus>): Promise<KommoStatus> {
-    const response = await this.client.post(`/api/v4/leads/pipelines/${pipelineId}/statuses`, [statusData]);
-    return response.data._embedded.statuses[0];
-  }
-
-  async updateLeadStatus(statusId: number, statusData: Partial<KommoStatus>): Promise<KommoStatus> {
-    const response = await this.client.patch(`/api/v4/leads/pipelines/statuses/${statusId}`, statusData);
-    return response.data;
-  }
-
-  // Movimentação de leads
-  async moveLeadToStatus(leadId: number, statusId: number): Promise<KommoLead> {
-    const response = await this.client.patch(`/api/v4/leads/${leadId}`, { status_id: statusId });
-    return response.data;
-  }
-
-  async moveLeadToPipeline(leadId: number, pipelineId: number, statusId?: number): Promise<KommoLead> {
-    const updateData: any = { pipeline_id: pipelineId };
-    if (statusId) {
-      updateData.status_id = statusId;
-    }
-    const response = await this.client.patch(`/api/v4/leads/${leadId}`, updateData);
-    return response.data;
-  }
-
-  // ===== NOVOS MÉTODOS: RELATÓRIOS E ANALYTICS =====
-
-  // Relatórios de vendas
-  async getSalesReport(dateFrom: string, dateTo: string): Promise<KommoSalesReport> {
-    const response = await this.client.get('/api/v4/leads/reports', {
-      params: {
-        date_from: dateFrom,
-        date_to: dateTo,
-        report_type: 'sales'
-      }
-    });
-    return response.data;
-  }
-
-  async getLeadConversionReport(dateFrom: string, dateTo: string): Promise<any> {
-    const response = await this.client.get('/api/v4/leads/reports', {
-      params: {
-        date_from: dateFrom,
-        date_to: dateTo,
-        report_type: 'conversion'
-      }
-    });
-    return response.data;
-  }
-
-  async getPipelinePerformanceReport(dateFrom: string, dateTo: string): Promise<any> {
-    const response = await this.client.get('/api/v4/leads/pipelines/reports', {
-      params: {
-        date_from: dateFrom,
-        date_to: dateTo
-      }
-    });
-    return response.data;
-  }
-
-  // Dashboard data
-  async getDashboardData(): Promise<KommoDashboardData> {
-    const response = await this.client.get('/api/v4/dashboard');
-    return response.data;
-  }
-
-  async getUserPerformanceStats(userId: number, dateFrom?: string, dateTo?: string): Promise<any> {
-    const params: any = {};
-    if (dateFrom) params.date_from = dateFrom;
-    if (dateTo) params.date_to = dateTo;
-    
-    const response = await this.client.get(`/api/v4/users/${userId}/performance`, { params });
-    return response.data;
-  }
-
-  // Analytics avançados
-  async getLeadAnalytics(leadId: number): Promise<any> {
-    const response = await this.client.get(`/api/v4/leads/${leadId}/analytics`);
-    return response.data;
-  }
-
-  async getPipelineAnalytics(pipelineId: number, dateFrom?: string, dateTo?: string): Promise<any> {
-    const params: any = {};
-    if (dateFrom) params.date_from = dateFrom;
-    if (dateTo) params.date_to = dateTo;
-    
-    const response = await this.client.get(`/api/v4/leads/pipelines/${pipelineId}/analytics`, { params });
-    return response.data;
-  }
-
-  // ===== NOTAS: FIXAR / DESAFIXAR (API 2026) =====
   async pinNote(entityType: 'leads' | 'contacts' | 'companies', noteId: number): Promise<any> {
-    const response = await this.client.post(`/api/v4/${entityType}/notes/${noteId}/pin`);
-    return response.data;
+    const r = await this.client.post(`/api/v4/${entityType}/notes/${noteId}/pin`);
+    return r.data;
   }
 
   async unpinNote(entityType: 'leads' | 'contacts' | 'companies', noteId: number): Promise<any> {
-    const response = await this.client.post(`/api/v4/${entityType}/notes/${noteId}/unpin`);
-    return response.data;
+    const r = await this.client.post(`/api/v4/${entityType}/notes/${noteId}/unpin`);
+    return r.data;
   }
 
-  // ===== SALESBOT (API v4 2026) =====
-  async runSalesbot(params: { entity_id: number; entity_type: string; [key: string]: any }): Promise<any> {
-    const response = await this.client.post('/api/v4/bots/run', params);
-    return response.data;
+  // ===== Loss Reasons =====
+  async getLossReasons(): Promise<any> {
+    const r = await this.client.get('/api/v4/leads/loss_reasons');
+    return r.data;
+  }
+
+  // ===== Custom Fields =====
+  async getLeadsCustomFields(): Promise<any> {
+    const r = await this.client.get('/api/v4/leads/custom_fields');
+    return r.data;
+  }
+
+  async getContactsCustomFields(): Promise<any> {
+    const r = await this.client.get('/api/v4/contacts/custom_fields');
+    return r.data;
+  }
+
+  async getCompaniesCustomFields(): Promise<any> {
+    const r = await this.client.get('/api/v4/companies/custom_fields');
+    return r.data;
+  }
+
+  // ===== Salesbot =====
+  async runSalesbot(params: { entity_id: number; entity_type: string; [k: string]: any }): Promise<any> {
+    const r = await this.client.post('/api/v4/bots/run', params);
+    return r.data;
   }
 
   async stopSalesbot(botId: number): Promise<any> {
-    const response = await this.client.post(`/api/v4/bots/${botId}/stop`);
-    return response.data;
+    const r = await this.client.post(`/api/v4/bots/${botId}/stop`);
+    return r.data;
+  }
+
+  // ===== Helper para extrair erro estruturado =====
+  static formatError(err: unknown): { status?: number; message: string; detail?: any } {
+    if (err instanceof AxiosError) {
+      return {
+        status: err.response?.status,
+        message: err.message,
+        detail: err.response?.data,
+      };
+    }
+    return { message: err instanceof Error ? err.message : String(err) };
   }
 }
