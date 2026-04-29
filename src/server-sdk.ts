@@ -25,6 +25,7 @@ interface MetadataCache {
   statuses: Map<number, KommoStatus>;
   users: Map<number, KommoUser>;
   lastRefresh: number;
+  refreshing: Promise<void> | null;
 }
 
 const cache: MetadataCache = {
@@ -32,6 +33,7 @@ const cache: MetadataCache = {
   statuses: new Map(),
   users: new Map(),
   lastRefresh: 0,
+  refreshing: null,
 };
 
 const CACHE_TTL = 10 * 60 * 1000;
@@ -39,35 +41,59 @@ const CACHE_TTL = 10 * 60 * 1000;
 async function refreshCache(force = false): Promise<void> {
   if (!force && Date.now() - cache.lastRefresh < CACHE_TTL && cache.pipelines.size > 0) return;
 
-  try {
-    const [pipelinesRes, usersRes] = await Promise.all([
-      kommoAPI.getPipelines().catch(() => null),
-      kommoAPI.getUsers().catch(() => null),
-    ]);
-
-    cache.pipelines.clear();
-    cache.statuses.clear();
-    cache.users.clear();
-
-    const pipelines: KommoPipeline[] = pipelinesRes?._embedded?.pipelines || [];
-    for (const p of pipelines) {
-      cache.pipelines.set(p.id, p);
-      const statuses: KommoStatus[] = p._embedded?.statuses || [];
-      for (const s of statuses) cache.statuses.set(s.id, s);
-    }
-
-    const users: KommoUser[] = usersRes?._embedded?.users || [];
-    for (const u of users) cache.users.set(u.id, u);
-
-    cache.lastRefresh = Date.now();
-    console.log(`[cache] refreshed: ${cache.pipelines.size} pipelines, ${cache.statuses.size} statuses, ${cache.users.size} users`);
-  } catch (err) {
-    console.error('[cache] refresh failed:', err);
+  // Evita refresh paralelo: se já tem um rodando, aguarda ele
+  if (cache.refreshing) {
+    return cache.refreshing;
   }
+
+  cache.refreshing = (async () => {
+    try {
+      // Timeout interno para não travar se a API estiver lenta
+      const timeout = (ms: number) => new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('cache refresh timeout')), ms)
+      );
+
+      const [pipelinesRes, usersRes] = await Promise.all([
+        Promise.race([kommoAPI.getPipelines(), timeout(15000)]).catch((err) => {
+          console.error('[cache] failed to fetch pipelines:', err.message || err);
+          return null;
+        }),
+        Promise.race([kommoAPI.getUsers(), timeout(15000)]).catch((err) => {
+          console.error('[cache] failed to fetch users:', err.message || err);
+          return null;
+        }),
+      ]);
+
+      // Só limpa se conseguiu pelo menos pipelines (mantém cache antigo se falhar tudo)
+      if (pipelinesRes) {
+        cache.pipelines.clear();
+        cache.statuses.clear();
+        const pipelines: KommoPipeline[] = (pipelinesRes as any)._embedded?.pipelines || [];
+        for (const p of pipelines) {
+          cache.pipelines.set(p.id, p);
+          const statuses: KommoStatus[] = p._embedded?.statuses || [];
+          for (const s of statuses) cache.statuses.set(s.id, s);
+        }
+      }
+
+      if (usersRes) {
+        cache.users.clear();
+        const users: KommoUser[] = (usersRes as any)._embedded?.users || [];
+        for (const u of users) cache.users.set(u.id, u);
+      }
+
+      cache.lastRefresh = Date.now();
+      console.log(`[cache] refreshed: ${cache.pipelines.size} pipelines, ${cache.statuses.size} statuses, ${cache.users.size} users`);
+    } finally {
+      cache.refreshing = null;
+    }
+  })();
+
+  return cache.refreshing;
 }
 
 // =====================================================================
-// Enriquecimento — modo compacto e verboso
+// Enriquecimento
 // =====================================================================
 function enrichLeadCompact(lead: any): any {
   if (!lead) return lead;
@@ -112,7 +138,6 @@ function enrichLeadVerbose(lead: any): any {
 // =====================================================================
 function buildLeadsParams(args: any): any {
   const params: any = {};
-
   if (args.limit) params.limit = Math.min(args.limit, 100);
   if (args.page) params.page = args.page;
   if (args.query) params.query = args.query;
@@ -137,7 +162,6 @@ function buildLeadsParams(args: any): any {
   if (args.updated_to) params['filter[updated_at][to]'] = args.updated_to;
   if (args.closed_from) params['filter[closed_at][from]'] = args.closed_from;
   if (args.closed_to) params['filter[closed_at][to]'] = args.closed_to;
-
   return params;
 }
 
@@ -154,27 +178,25 @@ function toUnixTimestamp(input: any): number | undefined {
 // =====================================================================
 function createMcpServer(): Server {
   const server = new Server(
-    { name: 'kommo-mcp-server', version: '3.1.0' },
+    { name: 'kommo-mcp-server', version: '3.2.0' },
     { capabilities: { tools: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
-      // ========== LEITURA ==========
       {
         name: 'get_leads',
-        description: 'Lista leads do Kommo com filtros completos. IMPORTANTE: por padrão retorna no máximo 25 leads em modo compacto (id, name, price, status_name, pipeline_name, is_won, is_lost, datas) para evitar estourar contexto. Aceita filtros por pipeline, status, vendedor responsável e datas. Use closed_from/closed_to para "vendas no período X". Para análises agregadas (contar/somar), prefira repetir chamadas com filtros específicos em vez de pedir limit alto. Datas em ISO YYYY-MM-DD ou Unix.',
+        description: 'Lista leads com filtros completos. Retorna até 25 leads em modo compacto por padrão. Use closed_from/closed_to para "vendas no período X". Para apenas contar leads, use count_leads. Datas em ISO YYYY-MM-DD ou Unix.',
         inputSchema: {
           type: 'object',
           properties: {
             limit: { type: 'number', description: 'Máximo por página (até 100, padrão 25)' },
-            page: { type: 'number', description: 'Página (padrão 1)' },
-            query: { type: 'string', description: 'Busca textual livre (nome, telefone, email)' },
-            pipeline_id: { type: 'number', description: 'Filtrar por funil' },
-            responsible_user_id: { type: 'number', description: 'Filtrar por vendedor' },
+            page: { type: 'number' },
+            query: { type: 'string' },
+            pipeline_id: { type: 'number' },
+            responsible_user_id: { type: 'number' },
             statuses: {
               type: 'array',
-              description: 'Array de {pipeline_id, status_id} para filtrar por etapa específica',
               items: {
                 type: 'object',
                 properties: {
@@ -183,21 +205,21 @@ function createMcpServer(): Server {
                 }
               }
             },
-            created_from: { type: 'string', description: 'Criados a partir de (ISO ou Unix)' },
+            created_from: { type: 'string' },
             created_to: { type: 'string' },
             updated_from: { type: 'string' },
             updated_to: { type: 'string' },
-            closed_from: { type: 'string', description: 'Para "vendas/perdas no período"' },
+            closed_from: { type: 'string' },
             closed_to: { type: 'string' },
             order_by: { type: 'string', enum: ['created_at', 'updated_at', 'id'] },
             order_dir: { type: 'string', enum: ['asc', 'desc'] },
-            verbose: { type: 'boolean', description: 'Se true, inclui tags, contacts, companies e custom fields. Padrão false.' }
+            verbose: { type: 'boolean', description: 'Incluir tags, contacts, custom fields. Padrão false.' }
           }
         }
       },
       {
         name: 'count_leads',
-        description: 'Conta leads que batem com os filtros, sem retornar os leads em si. Use isso quando quiser saber "quantos leads/vendas tive" sem precisar da lista completa. Aceita os mesmos filtros do get_leads.',
+        description: 'Conta leads (sem retornar a lista) que batem com os filtros. Aceita os mesmos filtros do get_leads. Retorna total_count, total_value e average_value.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -218,25 +240,25 @@ function createMcpServer(): Server {
             closed_from: { type: 'string' },
             closed_to: { type: 'string' },
             query: { type: 'string' },
-            max_pages: { type: 'number', description: 'Limite de páginas pra varrer (padrão 20, ou seja até 5000 leads). Aumente só se necessário.' }
+            max_pages: { type: 'number', description: 'Padrão 20 (até 5000 leads)' }
           }
         }
       },
       {
         name: 'get_lead_by_id',
-        description: 'Detalhe completo de um lead, incluindo notas, tags, contatos vinculados e custom fields.',
+        description: 'Detalhe completo de um lead.',
         inputSchema: {
           type: 'object',
           properties: {
             id: { type: 'number' },
-            with: { type: 'string', description: 'Ex: contacts,loss_reason,catalog_elements' }
+            with: { type: 'string' }
           },
           required: ['id']
         }
       },
       {
         name: 'get_lead_notes',
-        description: 'Lista as notas (anotações) de um lead. Onde fica a história da negociação.',
+        description: 'Notas (anotações) de um lead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -249,7 +271,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_lead_events',
-        description: 'Histórico de eventos de um lead (mudanças de status, criação, edições).',
+        description: 'Histórico de eventos de um lead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -261,11 +283,11 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_events',
-        description: 'Eventos do CRM com filtros. Para reconstruir histórico de fechamentos use type=lead_status_changed combinado com filtro de data. Suporta filter[created_at][from/to].',
+        description: 'Eventos do CRM com filtros. Para histórico de fechamentos: type=lead_status_changed.',
         inputSchema: {
           type: 'object',
           properties: {
-            type: { type: 'string', description: 'Ex: lead_status_changed, lead_added' },
+            type: { type: 'string' },
             entity_type: { type: 'string', enum: ['lead', 'contact', 'company'] },
             entity_id: { type: 'number' },
             created_from: { type: 'string' },
@@ -277,12 +299,17 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_pipelines',
-        description: 'Lista todos os funis com seus status. Status com type=1 são "Ganho" e type=2 são "Perdido". Use isso primeiro para descobrir os IDs antes de filtrar leads por status.',
-        inputSchema: { type: 'object', properties: {} }
+        description: 'Lista os funis. Por padrão retorna versão compacta (id, name, statuses_count). Passe include_statuses=true para ver as etapas de cada funil. Status com type=1 são "Ganho", type=2 são "Perdido".',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            include_statuses: { type: 'boolean', description: 'Padrão false. Se true, inclui o array de status de cada pipeline.' }
+          }
+        }
       },
       {
         name: 'get_pipeline_statuses',
-        description: 'Lista os status de um funil específico.',
+        description: 'Status (etapas) de um funil específico.',
         inputSchema: {
           type: 'object',
           properties: { pipeline_id: { type: 'number' } },
@@ -291,17 +318,17 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_users',
-        description: 'Lista todos os usuários (vendedores) da conta.',
+        description: 'Lista usuários (vendedores) da conta.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
         name: 'get_loss_reasons',
-        description: 'Lista os motivos de perda configurados.',
+        description: 'Lista motivos de perda configurados.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
         name: 'get_contacts',
-        description: 'Lista contatos. Padrão 25 por página.',
+        description: 'Lista contatos.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -313,7 +340,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_companies',
-        description: 'Lista empresas. Padrão 25 por página.',
+        description: 'Lista empresas.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -325,7 +352,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_tasks',
-        description: 'Lista tarefas. Padrão 25 por página.',
+        description: 'Lista tarefas.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -342,8 +369,6 @@ function createMcpServer(): Server {
         description: 'Definições dos custom fields de leads.',
         inputSchema: { type: 'object', properties: {} }
       },
-
-      // ========== ESCRITA ==========
       {
         name: 'create_lead',
         description: 'Cria um novo lead.',
@@ -403,14 +428,14 @@ function createMcpServer(): Server {
       },
       {
         name: 'create_task',
-        description: 'Cria uma tarefa associada a um lead, contato ou empresa.',
+        description: 'Cria uma tarefa.',
         inputSchema: {
           type: 'object',
           properties: {
             text: { type: 'string' },
             entity_id: { type: 'number' },
             entity_type: { type: 'string', enum: ['leads', 'contacts', 'companies'] },
-            complete_till: { type: 'number', description: 'Timestamp Unix do prazo' },
+            complete_till: { type: 'number' },
             responsible_user_id: { type: 'number' }
           },
           required: ['text', 'entity_id', 'entity_type', 'complete_till']
@@ -418,7 +443,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'complete_task',
-        description: 'Marca uma tarefa como concluída.',
+        description: 'Conclui uma tarefa.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -436,11 +461,11 @@ function createMcpServer(): Server {
     const a: any = args || {};
 
     try {
-      await refreshCache();
+      // refreshCache normal (sem force) — usa cache existente se válido
+      await refreshCache(false);
       let payload: any;
 
       switch (name) {
-        // ========== LEITURA ==========
         case 'get_leads': {
           const filterArgs = { ...a };
           ['created_from', 'created_to', 'updated_from', 'updated_to', 'closed_from', 'closed_to'].forEach(k => {
@@ -538,39 +563,84 @@ function createMcpServer(): Server {
         }
 
         case 'get_pipelines': {
-          await refreshCache(true);
-          const pipelines = Array.from(cache.pipelines.values()).map(p => ({
-            id: p.id,
-            name: p.name,
-            is_main: p.is_main,
-            is_archive: p.is_archive,
-            statuses: (p._embedded?.statuses || []).map(s => ({
-              id: s.id,
-              name: s.name,
-              type: s.type,
-              is_won: s.type === 1,
-              is_lost: s.type === 2,
-              color: s.color,
-              sort: s.sort,
-            }))
-          }));
-          payload = { count: pipelines.length, pipelines };
+          // Já está garantido pelo refreshCache acima — não força refresh aqui
+          const pipelinesArr = Array.from(cache.pipelines.values());
+
+          if (a.include_statuses) {
+            payload = {
+              count: pipelinesArr.length,
+              pipelines: pipelinesArr.map(p => ({
+                id: p.id,
+                name: p.name,
+                is_main: p.is_main,
+                is_archive: p.is_archive,
+                statuses: (p._embedded?.statuses || []).map(s => ({
+                  id: s.id,
+                  name: s.name,
+                  type: s.type,
+                  is_won: s.type === 1,
+                  is_lost: s.type === 2,
+                  sort: s.sort,
+                }))
+              }))
+            };
+          } else {
+            payload = {
+              count: pipelinesArr.length,
+              pipelines: pipelinesArr.map(p => ({
+                id: p.id,
+                name: p.name,
+                is_main: p.is_main,
+                is_archive: p.is_archive,
+                statuses_count: (p._embedded?.statuses || []).length,
+              })),
+              hint: 'Use include_statuses=true para ver as etapas de cada funil, ou get_pipeline_statuses(pipeline_id) para um funil específico.'
+            };
+          }
           break;
         }
 
         case 'get_pipeline_statuses': {
-          payload = await kommoAPI.getPipelineStatuses(a.pipeline_id);
+          // Tenta servir do cache primeiro
+          const pipeline = cache.pipelines.get(a.pipeline_id);
+          if (pipeline?._embedded?.statuses) {
+            payload = {
+              pipeline_id: a.pipeline_id,
+              pipeline_name: pipeline.name,
+              count: pipeline._embedded.statuses.length,
+              statuses: pipeline._embedded.statuses.map(s => ({
+                id: s.id,
+                name: s.name,
+                type: s.type,
+                is_won: s.type === 1,
+                is_lost: s.type === 2,
+                sort: s.sort,
+              }))
+            };
+          } else {
+            payload = await kommoAPI.getPipelineStatuses(a.pipeline_id);
+          }
           break;
         }
 
         case 'get_users': {
-          const data = await kommoAPI.getUsers();
-          const users = (data._embedded?.users || []).map((u: any) => ({
-            id: u.id,
-            name: u.name,
-            email: u.email,
-          }));
-          payload = { count: users.length, users };
+          // Servir do cache se disponível
+          if (cache.users.size > 0) {
+            const users = Array.from(cache.users.values()).map(u => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+            }));
+            payload = { count: users.length, users };
+          } else {
+            const data = await kommoAPI.getUsers();
+            const users = (data._embedded?.users || []).map((u: any) => ({
+              id: u.id,
+              name: u.name,
+              email: u.email,
+            }));
+            payload = { count: users.length, users };
+          }
           break;
         }
 
@@ -607,7 +677,6 @@ function createMcpServer(): Server {
           break;
         }
 
-        // ========== ESCRITA ==========
         case 'create_lead': {
           const leadPayload: any = { name: a.name };
           if (a.price != null) leadPayload.price = a.price;
@@ -674,9 +743,9 @@ function createMcpServer(): Server {
           message: e.message,
           detail: e.detail,
           hint: e.status === 401 ? 'Token expirado ou inválido' :
-                e.status === 403 ? 'Sem permissão para essa operação' :
-                e.status === 404 ? 'Recurso não encontrado — verifique IDs' :
-                e.status === 429 ? 'Rate limit (7 req/s). Reduza concorrência' :
+                e.status === 403 ? 'Sem permissão' :
+                e.status === 404 ? 'Recurso não encontrado' :
+                e.status === 429 ? 'Rate limit (7 req/s)' :
                 undefined
         }
       };
@@ -704,7 +773,7 @@ app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
-    version: '3.1.0',
+    version: '3.2.0',
     timestamp: new Date().toISOString(),
     kommo_base_url: process.env.KOMMO_BASE_URL,
     cache: {
@@ -766,9 +835,10 @@ app.all('/mcp', async (req, res) => {
 });
 
 app.listen(PORT, HOST, async () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Kommo MCP Server v3.1 on http://${HOST}:${PORT}`);
+  console.log(`[${new Date().toISOString()}] 🚀 Kommo MCP Server v3.2 on http://${HOST}:${PORT}`);
   console.log(`[${new Date().toISOString()}] 📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
   console.log(`[${new Date().toISOString()}] 💚 Health: http://${HOST}:${PORT}/health`);
   console.log(`[${new Date().toISOString()}] 🔗 Kommo: ${process.env.KOMMO_BASE_URL}`);
-  await refreshCache(true);
+  // Pré-aquece cache em background, sem bloquear startup
+  refreshCache(true).catch(err => console.error('[boot] cache preheat failed:', err));
 });
