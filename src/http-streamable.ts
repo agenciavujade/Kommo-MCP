@@ -685,6 +685,19 @@ function sendMcpResponse(res: express.Response, payload: object, req: express.Re
   }
 }
 
+// SSE endpoint for MCP discovery (GET /mcp)
+app.get('/mcp', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.write('data: {"type":"endpoint","uri":"/mcp"}\n\n');
+  res.end();
+});
+
+// MCP endpoint
+app.post('/mcp', async (req, res) => {
+
 // MCP endpoint
 app.post('/mcp', async (req, res) => {
   logger.info('🚀 Requisição MCP Kommo', { 
