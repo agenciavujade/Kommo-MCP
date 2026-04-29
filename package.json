@@ -1,34 +1,25 @@
 {
   "name": "kommo-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP Server for Kommo CRM integration",
-  "main": "dist/http-streamable.js",
-  "type": "module",
+  "version": "2.0.0",
+  "description": "MCP Server for Kommo CRM using official SDK",
+  "main": "dist/server-sdk.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/http-streamable.js",
-    "dev": "ts-node --esm src/http-streamable.ts"
+    "start": "node dist/server-sdk.js",
+    "dev": "tsc && node dist/server-sdk.js"
   },
-  "keywords": [
-    "mcp",
-    "kommo",
-    "crm",
-    "api"
-  ],
-  "author": "MCP Server",
-  "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.3",
-    "axios": "^1.6.0",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "axios": "^1.7.9",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^5.1.0"
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "ts-node": "^10.9.0",
-    "typescript": "^5.0.0"
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
   }
 }
