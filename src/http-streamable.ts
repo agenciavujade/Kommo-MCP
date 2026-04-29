@@ -675,13 +675,10 @@ function sendMcpResponse(res: express.Response, payload: object, req: express.Re
     res.setHeader('Content-Type', 'application/json');
     res.status(200).json(payload);
   } else {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-    res.end();
+ res.setHeader('Content-Type', 'application/json');
+res.setHeader('Access-Control-Allow-Origin', '*');
+res.setHeader('MCP-Session-Id', newSessionId);
+res.status(200).json(initResponse);
   }
 }
 
