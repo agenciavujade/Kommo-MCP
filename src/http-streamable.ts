@@ -697,9 +697,6 @@ app.get('/mcp', (req, res) => {
 
 // MCP endpoint
 app.post('/mcp', async (req, res) => {
-
-// MCP endpoint
-app.post('/mcp', async (req, res) => {
   logger.info('🚀 Requisição MCP Kommo', { 
     baseUrl: process.env.KOMMO_BASE_URL,
     environment: process.env.NODE_ENV 
