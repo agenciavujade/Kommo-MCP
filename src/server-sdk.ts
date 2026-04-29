@@ -18,7 +18,7 @@ const kommoAPI = new KommoAPI({
 });
 
 // =====================================================================
-// CACHE de pipelines, statuses e usuários (refresh a cada 10 min)
+// CACHE de pipelines, statuses e usuários
 // =====================================================================
 interface MetadataCache {
   pipelines: Map<number, KommoPipeline>;
@@ -66,29 +66,54 @@ async function refreshCache(force = false): Promise<void> {
   }
 }
 
-function enrichLead(lead: any): any {
+// =====================================================================
+// Enriquecimento — modo compacto e verboso
+// =====================================================================
+function enrichLeadCompact(lead: any): any {
   if (!lead) return lead;
   const status = cache.statuses.get(lead.status_id);
   const pipeline = cache.pipelines.get(lead.pipeline_id);
   const user = cache.users.get(lead.responsible_user_id);
 
   return {
-    ...lead,
+    id: lead.id,
+    name: lead.name,
+    price: lead.price,
+    status_id: lead.status_id,
     status_name: status?.name || null,
+    pipeline_id: lead.pipeline_id,
     pipeline_name: pipeline?.name || null,
+    responsible_user_id: lead.responsible_user_id,
     responsible_user_name: user?.name || null,
     is_won: status?.type === 1,
     is_lost: status?.type === 2,
+    created_at: lead.created_at,
+    updated_at: lead.updated_at,
+    closed_at: lead.closed_at || null,
+    loss_reason_id: lead.loss_reason_id || null,
+  };
+}
+
+function enrichLeadVerbose(lead: any): any {
+  if (!lead) return lead;
+  const compact = enrichLeadCompact(lead);
+  return {
+    ...compact,
+    tags: lead._embedded?.tags || lead.tags || [],
+    contacts: lead._embedded?.contacts || lead.contacts || [],
+    companies: lead._embedded?.companies || lead.companies || [],
+    custom_fields_values: lead.custom_fields_values || null,
+    loss_reason: lead._embedded?.loss_reason || null,
   };
 }
 
 // =====================================================================
-// Helpers para construir filtros
+// Helpers
 // =====================================================================
 function buildLeadsParams(args: any): any {
   const params: any = {};
 
-  if (args.limit) params.limit = Math.min(args.limit, 250);
+  if (args.limit) params.limit = Math.min(args.limit, 100);
   if (args.page) params.page = args.page;
   if (args.query) params.query = args.query;
   if (args.order_by) {
@@ -96,14 +121,9 @@ function buildLeadsParams(args: any): any {
     params[`order[${args.order_by}]`] = dir;
   }
   if (args.with) params.with = args.with;
-
-  // filter[pipeline_id]
   if (args.pipeline_id) params['filter[pipeline_id]'] = args.pipeline_id;
-
-  // filter[responsible_user_id]
   if (args.responsible_user_id) params['filter[responsible_user_id]'] = args.responsible_user_id;
 
-  // filter[statuses][N][pipeline_id] / [status_id]
   if (Array.isArray(args.statuses)) {
     args.statuses.forEach((st: any, i: number) => {
       if (st.pipeline_id) params[`filter[statuses][${i}][pipeline_id]`] = st.pipeline_id;
@@ -111,22 +131,16 @@ function buildLeadsParams(args: any): any {
     });
   }
 
-  // filter[created_at][from / to]
   if (args.created_from) params['filter[created_at][from]'] = args.created_from;
   if (args.created_to) params['filter[created_at][to]'] = args.created_to;
-
-  // filter[updated_at][from / to]
   if (args.updated_from) params['filter[updated_at][from]'] = args.updated_from;
   if (args.updated_to) params['filter[updated_at][to]'] = args.updated_to;
-
-  // filter[closed_at][from / to]
   if (args.closed_from) params['filter[closed_at][from]'] = args.closed_from;
   if (args.closed_to) params['filter[closed_at][to]'] = args.closed_to;
 
   return params;
 }
 
-// Converte data ISO/string para timestamp Unix se necessário
 function toUnixTimestamp(input: any): number | undefined {
   if (input == null) return undefined;
   if (typeof input === 'number') return input > 1e12 ? Math.floor(input / 1000) : input;
@@ -140,7 +154,7 @@ function toUnixTimestamp(input: any): number | undefined {
 // =====================================================================
 function createMcpServer(): Server {
   const server = new Server(
-    { name: 'kommo-mcp-server', version: '3.0.0' },
+    { name: 'kommo-mcp-server', version: '3.1.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -149,18 +163,18 @@ function createMcpServer(): Server {
       // ========== LEITURA ==========
       {
         name: 'get_leads',
-        description: 'Lista leads do Kommo com filtros completos. Aceita filtros por pipeline, status, vendedor responsável e intervalos de datas (created_at, updated_at, closed_at). Retornos vêm enriquecidos com status_name, pipeline_name, responsible_user_name, is_won e is_lost. Use closed_from/closed_to para responder "vendas no período X". Datas aceitam formato ISO (YYYY-MM-DD) ou timestamp Unix.',
+        description: 'Lista leads do Kommo com filtros completos. IMPORTANTE: por padrão retorna no máximo 25 leads em modo compacto (id, name, price, status_name, pipeline_name, is_won, is_lost, datas) para evitar estourar contexto. Aceita filtros por pipeline, status, vendedor responsável e datas. Use closed_from/closed_to para "vendas no período X". Para análises agregadas (contar/somar), prefira repetir chamadas com filtros específicos em vez de pedir limit alto. Datas em ISO YYYY-MM-DD ou Unix.',
         inputSchema: {
           type: 'object',
           properties: {
-            limit: { type: 'number', description: 'Máximo por página (até 250, padrão 50)' },
+            limit: { type: 'number', description: 'Máximo por página (até 100, padrão 25)' },
             page: { type: 'number', description: 'Página (padrão 1)' },
-            query: { type: 'string', description: 'Busca textual livre' },
+            query: { type: 'string', description: 'Busca textual livre (nome, telefone, email)' },
             pipeline_id: { type: 'number', description: 'Filtrar por funil' },
-            responsible_user_id: { type: 'number', description: 'Filtrar por vendedor responsável' },
+            responsible_user_id: { type: 'number', description: 'Filtrar por vendedor' },
             statuses: {
               type: 'array',
-              description: 'Filtrar por status. Array de {pipeline_id, status_id}',
+              description: 'Array de {pipeline_id, status_id} para filtrar por etapa específica',
               items: {
                 type: 'object',
                 properties: {
@@ -169,26 +183,53 @@ function createMcpServer(): Server {
                 }
               }
             },
-            created_from: { type: 'string', description: 'Criados a partir de (ISO YYYY-MM-DD ou Unix)' },
-            created_to: { type: 'string', description: 'Criados até (ISO YYYY-MM-DD ou Unix)' },
-            updated_from: { type: 'string', description: 'Atualizados a partir de' },
-            updated_to: { type: 'string', description: 'Atualizados até' },
-            closed_from: { type: 'string', description: 'Fechados a partir de (ISO ou Unix). Use para "vendas/perdas no período"' },
-            closed_to: { type: 'string', description: 'Fechados até' },
-            order_by: { type: 'string', enum: ['created_at', 'updated_at', 'id'], description: 'Campo de ordenação' },
+            created_from: { type: 'string', description: 'Criados a partir de (ISO ou Unix)' },
+            created_to: { type: 'string' },
+            updated_from: { type: 'string' },
+            updated_to: { type: 'string' },
+            closed_from: { type: 'string', description: 'Para "vendas/perdas no período"' },
+            closed_to: { type: 'string' },
+            order_by: { type: 'string', enum: ['created_at', 'updated_at', 'id'] },
             order_dir: { type: 'string', enum: ['asc', 'desc'] },
-            with: { type: 'string', description: 'Campos extras: contacts,catalog_elements,loss_reason,is_price_modified_by_robot' }
+            verbose: { type: 'boolean', description: 'Se true, inclui tags, contacts, companies e custom fields. Padrão false.' }
+          }
+        }
+      },
+      {
+        name: 'count_leads',
+        description: 'Conta leads que batem com os filtros, sem retornar os leads em si. Use isso quando quiser saber "quantos leads/vendas tive" sem precisar da lista completa. Aceita os mesmos filtros do get_leads.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pipeline_id: { type: 'number' },
+            responsible_user_id: { type: 'number' },
+            statuses: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  pipeline_id: { type: 'number' },
+                  status_id: { type: 'number' }
+                }
+              }
+            },
+            created_from: { type: 'string' },
+            created_to: { type: 'string' },
+            closed_from: { type: 'string' },
+            closed_to: { type: 'string' },
+            query: { type: 'string' },
+            max_pages: { type: 'number', description: 'Limite de páginas pra varrer (padrão 20, ou seja até 5000 leads). Aumente só se necessário.' }
           }
         }
       },
       {
         name: 'get_lead_by_id',
-        description: 'Detalhe completo de um lead, incluindo notas, tags, contatos vinculados e custom fields. Retorno enriquecido com nomes legíveis.',
+        description: 'Detalhe completo de um lead, incluindo notas, tags, contatos vinculados e custom fields.',
         inputSchema: {
           type: 'object',
           properties: {
-            id: { type: 'number', description: 'ID do lead' },
-            with: { type: 'string', description: 'Campos extras (ex: contacts,loss_reason,catalog_elements)' }
+            id: { type: 'number' },
+            with: { type: 'string', description: 'Ex: contacts,loss_reason,catalog_elements' }
           },
           required: ['id']
         }
@@ -208,7 +249,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_lead_events',
-        description: 'Histórico de eventos de um lead específico (mudanças de status, criação, edições). Para reconstruir a linha do tempo.',
+        description: 'Histórico de eventos de um lead (mudanças de status, criação, edições).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -220,14 +261,14 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_events',
-        description: 'Eventos do CRM com filtros. Endpoint correto para reconstruir histórico de fechamentos: filter[type]=lead_status_changed combinado com value_after.leads_statuses apontando para o status "Ganho" do funil. Suporta filter[created_at][from/to].',
+        description: 'Eventos do CRM com filtros. Para reconstruir histórico de fechamentos use type=lead_status_changed combinado com filtro de data. Suporta filter[created_at][from/to].',
         inputSchema: {
           type: 'object',
           properties: {
-            type: { type: 'string', description: 'Tipo do evento (ex: lead_status_changed, lead_added)' },
+            type: { type: 'string', description: 'Ex: lead_status_changed, lead_added' },
             entity_type: { type: 'string', enum: ['lead', 'contact', 'company'] },
             entity_id: { type: 'number' },
-            created_from: { type: 'string', description: 'ISO ou Unix' },
+            created_from: { type: 'string' },
             created_to: { type: 'string' },
             limit: { type: 'number' },
             page: { type: 'number' }
@@ -236,12 +277,12 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_pipelines',
-        description: 'Lista todos os funis com seus status (etapas). Status com type=1 são "Ganho" e type=2 são "Perdido".',
+        description: 'Lista todos os funis com seus status. Status com type=1 são "Ganho" e type=2 são "Perdido". Use isso primeiro para descobrir os IDs antes de filtrar leads por status.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
         name: 'get_pipeline_statuses',
-        description: 'Lista os status (etapas) de um funil específico.',
+        description: 'Lista os status de um funil específico.',
         inputSchema: {
           type: 'object',
           properties: { pipeline_id: { type: 'number' } },
@@ -255,12 +296,12 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_loss_reasons',
-        description: 'Lista os motivos de perda configurados na conta.',
+        description: 'Lista os motivos de perda configurados.',
         inputSchema: { type: 'object', properties: {} }
       },
       {
         name: 'get_contacts',
-        description: 'Lista contatos do Kommo CRM.',
+        description: 'Lista contatos. Padrão 25 por página.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -272,7 +313,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_companies',
-        description: 'Lista empresas do Kommo CRM.',
+        description: 'Lista empresas. Padrão 25 por página.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -284,7 +325,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_tasks',
-        description: 'Lista tarefas do Kommo CRM.',
+        description: 'Lista tarefas. Padrão 25 por página.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -298,14 +339,14 @@ function createMcpServer(): Server {
       },
       {
         name: 'get_lead_custom_fields',
-        description: 'Definições dos custom fields configurados para leads.',
+        description: 'Definições dos custom fields de leads.',
         inputSchema: { type: 'object', properties: {} }
       },
 
       // ========== ESCRITA ==========
       {
         name: 'create_lead',
-        description: 'Cria um novo lead no Kommo CRM.',
+        description: 'Cria um novo lead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -321,7 +362,7 @@ function createMcpServer(): Server {
       },
       {
         name: 'update_lead',
-        description: 'Atualiza um lead existente. Pode mudar nome, valor, status, pipeline, responsável.',
+        description: 'Atualiza um lead existente.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -337,20 +378,20 @@ function createMcpServer(): Server {
       },
       {
         name: 'move_lead_status',
-        description: 'Move um lead para outro status do funil. Atalho semântico para update_lead.',
+        description: 'Move um lead para outro status.',
         inputSchema: {
           type: 'object',
           properties: {
             lead_id: { type: 'number' },
             status_id: { type: 'number' },
-            pipeline_id: { type: 'number', description: 'Opcional, se mover entre funis' }
+            pipeline_id: { type: 'number' }
           },
           required: ['lead_id', 'status_id']
         }
       },
       {
         name: 'add_note_to_lead',
-        description: 'Adiciona uma nota (anotação) a um lead. Útil para registrar resumos de conversa.',
+        description: 'Adiciona uma nota a um lead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -366,7 +407,7 @@ function createMcpServer(): Server {
         inputSchema: {
           type: 'object',
           properties: {
-            text: { type: 'string', description: 'Texto da tarefa' },
+            text: { type: 'string' },
             entity_id: { type: 'number' },
             entity_type: { type: 'string', enum: ['leads', 'contacts', 'companies'] },
             complete_till: { type: 'number', description: 'Timestamp Unix do prazo' },
@@ -382,7 +423,7 @@ function createMcpServer(): Server {
           type: 'object',
           properties: {
             task_id: { type: 'number' },
-            result_text: { type: 'string', description: 'Resultado/comentário da tarefa' }
+            result_text: { type: 'string' }
           },
           required: ['task_id']
         }
@@ -395,15 +436,12 @@ function createMcpServer(): Server {
     const a: any = args || {};
 
     try {
-      // Garante cache pronto antes de processar
       await refreshCache();
-
       let payload: any;
 
       switch (name) {
         // ========== LEITURA ==========
         case 'get_leads': {
-          // Converte datas ISO para Unix se vierem como string
           const filterArgs = { ...a };
           ['created_from', 'created_to', 'updated_from', 'updated_to', 'closed_from', 'closed_to'].forEach(k => {
             if (filterArgs[k] != null) {
@@ -411,38 +449,75 @@ function createMcpServer(): Server {
               if (ts !== undefined) filterArgs[k] = ts;
             }
           });
-          if (!filterArgs.limit) filterArgs.limit = 50;
+          if (!filterArgs.limit) filterArgs.limit = 25;
 
           const params = buildLeadsParams(filterArgs);
           const data = await kommoAPI.getLeads(params);
-          const leads = (data._embedded?.leads || []).map(enrichLead);
+          const rawLeads = data._embedded?.leads || [];
+          const enricher = a.verbose ? enrichLeadVerbose : enrichLeadCompact;
+          const leads = rawLeads.map(enricher);
 
           payload = {
             count: leads.length,
-            page: data._page || filterArgs.page || 1,
+            page: filterArgs.page || 1,
             has_next: !!data._links?.next,
             leads,
           };
           break;
         }
 
+        case 'count_leads': {
+          const filterArgs = { ...a };
+          ['created_from', 'created_to', 'updated_from', 'updated_to', 'closed_from', 'closed_to'].forEach(k => {
+            if (filterArgs[k] != null) {
+              const ts = toUnixTimestamp(filterArgs[k]);
+              if (ts !== undefined) filterArgs[k] = ts;
+            }
+          });
+
+          const maxPages = a.max_pages || 20;
+          const limit = 250;
+          let page = 1;
+          let total = 0;
+          let totalValue = 0;
+          let hasNext = true;
+
+          while (hasNext && page <= maxPages) {
+            const params = buildLeadsParams({ ...filterArgs, limit, page });
+            const data = await kommoAPI.getLeads(params);
+            const leads = data._embedded?.leads || [];
+            total += leads.length;
+            totalValue += leads.reduce((sum: number, l: any) => sum + (l.price || 0), 0);
+            hasNext = !!data._links?.next;
+            page++;
+            if (hasNext) await new Promise(res => setTimeout(res, 150));
+          }
+
+          payload = {
+            total_count: total,
+            total_value: totalValue,
+            average_value: total > 0 ? totalValue / total : 0,
+            pages_scanned: page - 1,
+            reached_max_pages: page > maxPages && hasNext,
+          };
+          break;
+        }
+
         case 'get_lead_by_id': {
           const lead = await kommoAPI.getLead(a.id, a.with);
-          payload = enrichLead(lead);
+          payload = enrichLeadVerbose(lead);
           break;
         }
 
         case 'get_lead_notes': {
-          const params: any = {};
-          if (a.limit) params.limit = a.limit;
+          const params: any = { limit: a.limit || 25 };
           if (a.page) params.page = a.page;
           payload = await kommoAPI.getLeadNotes(a.lead_id, params);
           break;
         }
 
         case 'get_lead_events': {
-          const params: any = {};
-          if (a.limit) params.limit = a.limit;
+          const params: any = { limit: a.limit || 25 };
           payload = await kommoAPI.getLeadEvents(a.lead_id, params);
           break;
         }
@@ -456,14 +531,14 @@ function createMcpServer(): Server {
           const ct = toUnixTimestamp(a.created_to);
           if (cf) params['filter[created_at][from]'] = cf;
           if (ct) params['filter[created_at][to]'] = ct;
-          if (a.limit) params.limit = a.limit;
+          params.limit = a.limit || 25;
           if (a.page) params.page = a.page;
           payload = await kommoAPI.getEvents(params);
           break;
         }
 
         case 'get_pipelines': {
-          await refreshCache(true); // força refresh nesse comando
+          await refreshCache(true);
           const pipelines = Array.from(cache.pipelines.values()).map(p => ({
             id: p.id,
             name: p.name,
@@ -490,7 +565,12 @@ function createMcpServer(): Server {
 
         case 'get_users': {
           const data = await kommoAPI.getUsers();
-          payload = data;
+          const users = (data._embedded?.users || []).map((u: any) => ({
+            id: u.id,
+            name: u.name,
+            email: u.email,
+          }));
+          payload = { count: users.length, users };
           break;
         }
 
@@ -500,21 +580,21 @@ function createMcpServer(): Server {
         }
 
         case 'get_contacts': {
-          const params: any = { limit: a.limit || 50, page: a.page || 1 };
+          const params: any = { limit: a.limit || 25, page: a.page || 1 };
           if (a.query) params.query = a.query;
           payload = await kommoAPI.getContacts(params);
           break;
         }
 
         case 'get_companies': {
-          const params: any = { limit: a.limit || 50, page: a.page || 1 };
+          const params: any = { limit: a.limit || 25, page: a.page || 1 };
           if (a.query) params.query = a.query;
           payload = await kommoAPI.getCompanies(params);
           break;
         }
 
         case 'get_tasks': {
-          const params: any = { limit: a.limit || 50, page: a.page || 1 };
+          const params: any = { limit: a.limit || 25, page: a.page || 1 };
           if (a.responsible_user_id) params['filter[responsible_user_id]'] = a.responsible_user_id;
           if (a.entity_type) params['filter[entity_type]'] = a.entity_type;
           if (a.is_completed != null) params['filter[is_completed]'] = a.is_completed ? 1 : 0;
@@ -535,7 +615,7 @@ function createMcpServer(): Server {
           if (a.pipeline_id) leadPayload.pipeline_id = a.pipeline_id;
           if (a.responsible_user_id) leadPayload.responsible_user_id = a.responsible_user_id;
           if (Array.isArray(a.tags)) leadPayload._embedded = { tags: a.tags.map((t: string) => ({ name: t })) };
-          payload = enrichLead(await kommoAPI.createLead(leadPayload));
+          payload = enrichLeadCompact(await kommoAPI.createLead(leadPayload));
           break;
         }
 
@@ -544,14 +624,14 @@ function createMcpServer(): Server {
           ['name', 'price', 'status_id', 'pipeline_id', 'responsible_user_id'].forEach(k => {
             if (a[k] != null) update[k] = a[k];
           });
-          payload = enrichLead(await kommoAPI.updateLead(a.id, update));
+          payload = enrichLeadCompact(await kommoAPI.updateLead(a.id, update));
           break;
         }
 
         case 'move_lead_status': {
           const update: any = { status_id: a.status_id };
           if (a.pipeline_id) update.pipeline_id = a.pipeline_id;
-          payload = enrichLead(await kommoAPI.updateLead(a.lead_id, update));
+          payload = enrichLeadCompact(await kommoAPI.updateLead(a.lead_id, update));
           break;
         }
 
@@ -593,10 +673,10 @@ function createMcpServer(): Server {
           status: e.status,
           message: e.message,
           detail: e.detail,
-          hint: e.status === 401 ? 'Token expirado ou inválido — verifique KOMMO_ACCESS_TOKEN' :
+          hint: e.status === 401 ? 'Token expirado ou inválido' :
                 e.status === 403 ? 'Sem permissão para essa operação' :
                 e.status === 404 ? 'Recurso não encontrado — verifique IDs' :
-                e.status === 429 ? 'Rate limit (7 req/s). Reduza concorrência ou aumente delay' :
+                e.status === 429 ? 'Rate limit (7 req/s). Reduza concorrência' :
                 undefined
         }
       };
@@ -624,7 +704,7 @@ app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
-    version: '3.0.0',
+    version: '3.1.0',
     timestamp: new Date().toISOString(),
     kommo_base_url: process.env.KOMMO_BASE_URL,
     cache: {
@@ -686,10 +766,9 @@ app.all('/mcp', async (req, res) => {
 });
 
 app.listen(PORT, HOST, async () => {
-  console.log(`[${new Date().toISOString()}] 🚀 Kommo MCP Server v3.0 on http://${HOST}:${PORT}`);
+  console.log(`[${new Date().toISOString()}] 🚀 Kommo MCP Server v3.1 on http://${HOST}:${PORT}`);
   console.log(`[${new Date().toISOString()}] 📡 MCP endpoint: http://${HOST}:${PORT}/mcp`);
   console.log(`[${new Date().toISOString()}] 💚 Health: http://${HOST}:${PORT}/health`);
   console.log(`[${new Date().toISOString()}] 🔗 Kommo: ${process.env.KOMMO_BASE_URL}`);
-  // Pre-aquece cache
   await refreshCache(true);
 });
