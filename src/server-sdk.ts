@@ -119,6 +119,7 @@ function createMcpServer(): Server {
   // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const safeArgs: any = args || {};
 
     try {
       let data: any;
@@ -126,33 +127,33 @@ function createMcpServer(): Server {
       switch (name) {
         case 'get_leads':
           data = await kommoAPI.getLeads({
-            limit: (args?.limit as number) || 50,
-            page: (args?.page as number) || 1
+            limit: safeArgs.limit || 50,
+            page: safeArgs.page || 1
           });
           break;
 
         case 'create_lead':
-          data = await kommoAPI.createLead(args);
+          data = await kommoAPI.createLead(safeArgs);
           break;
 
         case 'get_contacts':
           data = await kommoAPI.getContacts({
-            limit: (args?.limit as number) || 50,
-            page: (args?.page as number) || 1
+            limit: safeArgs.limit || 50,
+            page: safeArgs.page || 1
           });
           break;
 
         case 'get_companies':
           data = await kommoAPI.getCompanies({
-            limit: (args?.limit as number) || 50,
-            page: (args?.page as number) || 1
+            limit: safeArgs.limit || 50,
+            page: safeArgs.page || 1
           });
           break;
 
         case 'get_tasks':
           data = await kommoAPI.getTasks({
-            limit: (args?.limit as number) || 50,
-            page: (args?.page as number) || 1
+            limit: safeArgs.limit || 50,
+            page: safeArgs.page || 1
           });
           break;
 
@@ -161,8 +162,8 @@ function createMcpServer(): Server {
           break;
 
         case 'get_sales_report':
-          const dateFrom = (args?.dateFrom as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          const dateTo = (args?.dateTo as string) || new Date().toISOString().slice(0, 10);
+          const dateFrom = safeArgs.dateFrom || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const dateTo = safeArgs.dateTo || new Date().toISOString().slice(0, 10);
           data = await kommoAPI.getSalesReport(dateFrom, dateTo);
           break;
 
@@ -224,10 +225,8 @@ app.all('/mcp', async (req, res) => {
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && transports[sessionId]) {
-      // Existing session
       transport = transports[sessionId];
     } else if (!sessionId && req.method === 'POST' && req.body?.method === 'initialize') {
-      // New initialization request
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
