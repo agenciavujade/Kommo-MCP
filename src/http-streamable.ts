@@ -797,8 +797,8 @@ app.post('/mcp', async (req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       res.setHeader('MCP-Session-Id', newSessionId);
-      res.write(`data: ${JSON.stringify(initResponse)}\n\n`);
-      res.end();
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).json(initResponse);
       return;
     }
 
