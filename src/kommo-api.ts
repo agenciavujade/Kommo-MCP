@@ -22,6 +22,7 @@ export interface KommoLead {
   contacts?: KommoContact[];
   companies?: KommoCompany[];
   custom_fields_values?: any[];
+  _embedded?: any;
 }
 
 export interface KommoContact {
@@ -37,6 +38,7 @@ export interface KommoContact {
   tags?: string[];
   leads?: KommoLead[];
   companies?: KommoCompany[];
+  _embedded?: any;
 }
 
 export interface KommoCompany {
@@ -60,9 +62,7 @@ export interface KommoPipeline {
   is_unsorted_on: boolean;
   is_archive: boolean;
   account_id: number;
-  _embedded?: {
-    statuses?: KommoStatus[];
-  };
+  _embedded?: { statuses?: KommoStatus[] };
   _links?: any;
 }
 
@@ -111,7 +111,7 @@ export interface KommoStatus {
   is_editable?: boolean;
   pipeline_id: number;
   color: string;
-  type: number; // 0 = normal, 1 = won, 2 = lost
+  type: number;
   account_id: number;
 }
 
@@ -128,6 +128,23 @@ export interface KommoUser {
   email: string;
   lang: string;
   rights: any;
+}
+
+export interface KommoChat {
+  id: string;
+  type?: string;
+  contact_id?: number;
+  source?: any;
+}
+
+export interface KommoMessage {
+  id: string;
+  chat_id?: string;
+  type: string;
+  author?: { id?: string; type?: string; name?: string };
+  text?: string;
+  created_at: number;
+  attachment?: any;
 }
 
 export class KommoAPI {
@@ -170,23 +187,17 @@ export class KommoAPI {
     const limit = 250;
     let consecutiveEmptyPages = 0;
     const maxEmptyPages = 2;
-    const maxPages = 50; // safety cap (12.5k leads max)
+    const maxPages = 50;
 
     while (hasMore && consecutiveEmptyPages < maxEmptyPages && page <= maxPages) {
       try {
-        const r = await this.client.get('/api/v4/leads', {
-          params: { ...params, limit, page }
-        });
+        const r = await this.client.get('/api/v4/leads', { params: { ...params, limit, page } });
         const leads = r.data._embedded?.leads || [];
-        if (leads.length === 0) {
-          consecutiveEmptyPages++;
-        } else {
-          consecutiveEmptyPages = 0;
-          allLeads.push(...leads);
-        }
+        if (leads.length === 0) consecutiveEmptyPages++;
+        else { consecutiveEmptyPages = 0; allLeads.push(...leads); }
         page++;
         hasMore = !!r.data._links?.next;
-        if (hasMore) await new Promise(res => setTimeout(res, 150)); // rate-limit safety
+        if (hasMore) await new Promise(res => setTimeout(res, 150));
       } catch (err) {
         console.error(`Erro paginação leads página ${page}:`, err);
         break;
@@ -200,9 +211,46 @@ export class KommoAPI {
     return r.data._embedded.leads[0];
   }
 
-  async updateLead(id: number, lead: Partial<KommoLead>): Promise<KommoLead> {
+  async updateLead(id: number, lead: any): Promise<KommoLead> {
     const r = await this.client.patch(`/api/v4/leads/${id}`, lead);
     return r.data;
+  }
+
+  async updateLeadsBulk(leads: any[]): Promise<any> {
+    // Kommo aceita array com até 250 leads por chamada
+    const r = await this.client.patch('/api/v4/leads', leads);
+    return r.data;
+  }
+
+  // ===== Tags em leads =====
+  async addTagsToLead(leadId: number, tagNames: string[]): Promise<KommoLead> {
+    // O Kommo PATCH /leads/{id} aceita _embedded.tags com {name} para adicionar
+    const payload: any = {
+      _embedded: {
+        tags: tagNames.map(name => ({ name }))
+      }
+    };
+    const r = await this.client.patch(`/api/v4/leads/${leadId}`, payload);
+    return r.data;
+  }
+
+  async setLeadTags(leadId: number, tagNames: string[]): Promise<KommoLead> {
+    // Substitui completamente as tags do lead pelas informadas (passa array vazio para limpar)
+    const payload: any = {
+      _embedded: {
+        tags: tagNames.map(name => ({ name }))
+      }
+    };
+    const r = await this.client.patch(`/api/v4/leads/${leadId}`, payload);
+    return r.data;
+  }
+
+  async removeTagsFromLead(leadId: number, tagNamesToRemove: string[]): Promise<KommoLead> {
+    // Estratégia: pega o lead com tags, remove as desejadas e faz set
+    const lead = await this.getLead(leadId, 'tags');
+    const currentTags = (lead._embedded?.tags || []).map((t: any) => t.name).filter(Boolean);
+    const remaining = currentTags.filter((t: string) => !tagNamesToRemove.includes(t));
+    return this.setLeadTags(leadId, remaining);
   }
 
   // ===== Contacts =====
@@ -211,8 +259,10 @@ export class KommoAPI {
     return r.data;
   }
 
-  async getContact(id: number): Promise<KommoContact> {
-    const r = await this.client.get(`/api/v4/contacts/${id}`);
+  async getContact(id: number, withParam?: string): Promise<KommoContact> {
+    const params: any = {};
+    if (withParam) params.with = withParam;
+    const r = await this.client.get(`/api/v4/contacts/${id}`, { params });
     return r.data;
   }
 
@@ -357,6 +407,24 @@ export class KommoAPI {
     return r.data;
   }
 
+  // ===== Mensagens / Chats =====
+  // O caminho oficial para pegar mensagens de um lead é via talks (conversations) -> chats -> messages.
+  // Algumas contas usam endpoints diferentes dependendo da integração de chat ativa.
+  async getLeadTalks(leadId: number, params?: any): Promise<any> {
+    // /api/v4/talks pode ser filtrado por entity (lead) e entity_id
+    const queryParams: any = { ...params };
+    queryParams['filter[entity]'] = 'leads';
+    queryParams['filter[entity_id]'] = leadId;
+    const r = await this.client.get('/api/v4/talks', { params: queryParams });
+    return r.data;
+  }
+
+  async getChatMessages(chatId: string, params?: any): Promise<any> {
+    // Endpoint Chats API do Kommo
+    const r = await this.client.get(`/api/v4/chats/${chatId}/messages`, { params });
+    return r.data;
+  }
+
   // ===== Salesbot =====
   async runSalesbot(params: { entity_id: number; entity_type: string; [k: string]: any }): Promise<any> {
     const r = await this.client.post('/api/v4/bots/run', params);
@@ -368,7 +436,7 @@ export class KommoAPI {
     return r.data;
   }
 
-  // ===== Helper para extrair erro estruturado =====
+  // ===== Helper de erro estruturado =====
   static formatError(err: unknown): { status?: number; message: string; detail?: any } {
     if (err instanceof AxiosError) {
       return {
